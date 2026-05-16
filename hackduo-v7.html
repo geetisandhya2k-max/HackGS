@@ -305,7 +305,11 @@ body.g-mode .ring-pct{color:var(--geet);}body.s-mode .ring-pct{color:var(--samay
       <div class="tb-logo">HACK<span class="g">G</span><span class="s">S</span></div>
       <div class="upill geet" id="upill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>Geet</div>
     </div>
-    <button class="sw-btn" onclick="switchUser()">Switch ↗</button>
+    <div style="display:flex;align-items:center;gap:0.5rem">
+      <div id="sync-dot" title="Sync status" onclick="showSyncInfo()" style="width:8px;height:8px;border-radius:50%;background:var(--muted);transition:background 0.3s;cursor:pointer;flex-shrink:0"></div>
+      <button class="sw-btn" onclick="showSyncInfo()">🔗 Sync</button>
+      <button class="sw-btn" onclick="switchUser()">Switch ↗</button>
+    </div>
   </div>
 
   <!-- HOME -->
@@ -373,6 +377,12 @@ body.g-mode .ring-pct{color:var(--geet);}body.s-mode .ring-pct{color:var(--samay
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<div id="sync-banner" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(7,9,15,0.97);align-items:center;justify-content:center;flex-direction:column;gap:1rem">
+  <div style="font-family:Orbitron,monospace;font-size:1.1rem;color:#00e5c8;font-weight:700">HackDuo</div>
+  <div style="font-family:Share Tech Mono,monospace;font-size:0.75rem;color:#6a8aaa;letter-spacing:0.1em">Syncing data...</div>
+  <div style="width:48px;height:48px;border:3px solid #1c2438;border-top-color:#00e5c8;border-radius:50%;animation:spin 0.8s linear infinite"></div>
+</div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
 
 <script>
 // ════════════════════════════════════════════
@@ -666,16 +676,180 @@ const MONTH_MSG_FROM_GEET=[
 ];
 
 // ════════════════════════════════════════════
-// STATE
+// STATE — jsonblob.com (truly zero auth, zero signup, free forever)
+// First load creates a blob, ID saved in localStorage
+// Partner loads same blob via shared ID stored in the URL
 // ════════════════════════════════════════════
-const KEYS={shared:'hd_shared_v6',geet:'hd_geet_v6',samaya:'hd_samaya_v6',session:'hd_session_v6'};
-const loadS=k=>{try{return JSON.parse(localStorage.getItem(k))||{};}catch{return{};}};
-const saveK=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
-let shared=loadS(KEYS.shared),geetData=loadS(KEYS.geet),samayaData=loadS(KEYS.samaya),sess=loadS(KEYS.session);
-if(!shared.streak)shared.streak={count:0,lastDate:''};
-if(!shared.notes)shared.notes=[];
-['geet','samaya'].forEach(u=>{const d=u==='geet'?geetData:samayaData;if(!d.daily)d.daily={};if(!d.months)d.months={};if(!d.collapsed)d.collapsed={};if(!d.certs)d.certs={};if(!d.studyDay)d.studyDay=1;if(!d.studyLog)d.studyLog={};if(!d.monthProgress)d.monthProgress={};});
+
+const BLOB_API = 'https://jsonblob.com/api/jsonBlob';
+
+// Local session only (who is logged in on this device)
+const loadSession=()=>{try{return JSON.parse(localStorage.getItem('hd_sess_v8'))||{};}catch{return{};}};
+const saveSession=v=>localStorage.setItem('hd_sess_v8',JSON.stringify(v));
+
+let sess=loadSession();
 let CU=sess.user||null,showHist=false;
+
+// In-memory data store
+let cloudData={
+  shared:{streak:{count:0,lastDate:''},notes:[]},
+  geet:{daily:{},months:{},collapsed:{},certs:{},studyDay:1,studyLog:{},monthProgress:{}},
+  samaya:{daily:{},months:{},collapsed:{},certs:{},studyDay:1,studyLog:{},monthProgress:{}}
+};
+let geetData=cloudData.geet;
+let samayaData=cloudData.samaya;
+let shared=cloudData.shared;
+let saveTimer=null;
+
+function initDefaults(d){
+  if(!d)d={};
+  if(!d.daily)d.daily={};if(!d.months)d.months={};if(!d.collapsed)d.collapsed={};
+  if(!d.certs)d.certs={};if(!d.studyDay)d.studyDay=1;if(!d.studyLog)d.studyLog={};
+  if(!d.monthProgress)d.monthProgress={};
+  return d;
+}
+
+function applyCloudData(data){
+  if(!data)return;
+  if(data.shared){
+    if(!data.shared.streak)data.shared.streak={count:0,lastDate:''};
+    if(!data.shared.notes)data.shared.notes=[];
+    cloudData.shared=data.shared;
+    shared=cloudData.shared;
+  }
+  if(data.geet){cloudData.geet=initDefaults(data.geet);geetData=cloudData.geet;}
+  if(data.samaya){cloudData.samaya=initDefaults(data.samaya);samayaData=cloudData.samaya;}
+}
+
+function getBlobId(){return localStorage.getItem('hd_blob_id_v8')||'';}
+function saveBlobId(id){localStorage.setItem('hd_blob_id_v8',id);}
+
+// Read blob ID from URL if partner shared it
+(function(){
+  const p=new URLSearchParams(window.location.search);
+  const b=p.get('blob');
+  if(b&&b.length>5){saveBlobId(b);window.history.replaceState({},'',window.location.pathname);}
+})();
+
+async function loadCloudData(){
+  let blobId=getBlobId();
+  if(!blobId){
+    // First time — create a new blob
+    try{
+      const r=await fetch(BLOB_API,{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Accept':'application/json'},
+        body:JSON.stringify(cloudData)
+      });
+      if(r.ok){
+        // jsonblob returns the URL in the Location header e.g. https://jsonblob.com/api/jsonBlob/123456
+        const loc=r.headers.get('Location')||'';
+        blobId=loc.split('/').pop();
+        if(blobId)saveBlobId(blobId);
+      }
+    }catch(e){console.log('Create blob error',e);}
+  } else {
+    // Load existing blob
+    try{
+      const r=await fetch(BLOB_API+'/'+blobId,{headers:{'Accept':'application/json'}});
+      if(r.ok){
+        const data=await r.json();
+        if(data&&data.shared)applyCloudData(data);
+      }
+    }catch(e){console.log('Load blob error',e);}
+  }
+  cloudData.geet=initDefaults(cloudData.geet);
+  cloudData.samaya=initDefaults(cloudData.samaya);
+  geetData=cloudData.geet;
+  samayaData=cloudData.samaya;
+}
+
+async function saveCloudData(){
+  if(saveTimer)clearTimeout(saveTimer);
+  saveTimer=setTimeout(async()=>{
+    saveTimer=null;
+    const blobId=getBlobId();
+    if(!blobId){showSyncDot(false);return;}
+    cloudData.geet=geetData;
+    cloudData.samaya=samayaData;
+    cloudData.shared=shared;
+    try{
+      const r=await fetch(BLOB_API+'/'+blobId,{
+        method:'PUT',
+        headers:{'Content-Type':'application/json','Accept':'application/json'},
+        body:JSON.stringify(cloudData)
+      });
+      showSyncDot(r.ok);
+    }catch(e){
+      showSyncDot(false);
+      localStorage.setItem('hd_geet_v8',JSON.stringify(geetData));
+      localStorage.setItem('hd_samaya_v8',JSON.stringify(samayaData));
+      localStorage.setItem('hd_shared_v8',JSON.stringify(shared));
+    }
+  },800);
+}
+
+function showSyncInfo(){
+  const blobId=getBlobId();
+  if(!blobId){showToast('Still loading... try again in 2 seconds');return;}
+  const syncUrl=window.location.origin+window.location.pathname+'?blob='+blobId;
+  if(navigator.clipboard){
+    navigator.clipboard.writeText(syncUrl).then(()=>{
+      showToast('✅ Link copied! Send to your partner on WhatsApp');
+    }).catch(()=>{prompt('Copy and send this to your partner:',syncUrl);});
+  } else {
+    prompt('Copy and send this to your partner:',syncUrl);
+  }
+}
+function showSyncDot(ok){
+  const el=document.getElementById('sync-dot');
+  if(!el)return;
+  el.style.background=ok?'var(--green)':'var(--red)';
+  el.title=ok?'Synced ✓':'Sync failed';
+  setTimeout(()=>{if(el)el.style.background='var(--muted)';},3000);
+}
+
+function startSyncPoll(){
+  setInterval(async()=>{
+    if(!CU)return;
+    const blobId=getBlobId();
+    if(!blobId)return;
+    try{
+      const r=await fetch(BLOB_API+'/'+blobId,{headers:{'Accept':'application/json'}});
+      if(r.ok){
+        const data=await r.json();
+        if(data&&data.shared){
+          // Only update partner's data from cloud — our own data we already have
+          const partner=CU==='geet'?'samaya':'geet';
+          cloudData[partner]=initDefaults(data[partner]||{});
+          if(CU==='geet')samayaData=cloudData[partner];
+          else geetData=cloudData[partner];
+          // Always update shared (notes, streak)
+          if(data.shared){
+            if(!data.shared.streak)data.shared.streak={count:0,lastDate:''};
+            if(!data.shared.notes)data.shared.notes=[];
+            cloudData.shared=data.shared;shared=data.shared;
+          }
+          const activePage=document.querySelector('.page.active');
+          if(activePage){
+            const pid=activePage.id.replace('page-','');
+            if(pid==='home')renderHome();
+            if(pid==='daily')renderDaily();
+            if(pid==='notes')renderNotes();
+          }
+        }
+      }
+    }catch(e){}
+  },10000);
+}
+
+const saveK=()=>saveCloudData();
+const getUD=u=>u==='geet'?geetData:samayaData;
+const saveUD=(u,v)=>{
+  if(u==='geet'){geetData=v;cloudData.geet=v;}
+  else{samayaData=v;cloudData.samaya=v;}
+  saveCloudData();
+};
 
 // ════════════════════════════════════════════
 // HELPERS
@@ -686,8 +860,6 @@ const dayType=()=>{const d=new Date().getDay();return d===6?'sat':d===0?'sun':'w
 const dayName=()=>['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][new Date().getDay()];
 const getMonthsDone=u=>Object.keys(getUD(u).months||{}).filter(k=>getUD(u).months[k]).length;
 const getCurMonthIdx=u=>Math.min(getMonthsDone(u),11);
-const getUD=u=>u==='geet'?geetData:samayaData;
-const saveUD=(u,v)=>{if(u==='geet'){geetData=v;saveK(KEYS.geet,v);}else{samayaData=v;saveK(KEYS.samaya,v);}};
 const dayOfYear=()=>{const n=new Date(),s=new Date(n.getFullYear(),0,0);return Math.floor((n-s)/86400000);};
 function getMyTasks(u){const dt=dayType();if(dt==='sun')return u==='geet'?GEET_SUN:SAMAYA_SUN;if(dt==='sat')return u==='geet'?GEET_SAT:SAMAYA_SAT;return u==='geet'?GEET_WD:SAMAYA_WD;}
 function getPartnerTasks(u){const p=u==='geet'?'samaya':'geet';const dt=dayType();if(dt==='sun')return p==='geet'?GEET_SUN:SAMAYA_SUN;if(dt==='sat')return p==='geet'?GEET_SAT:SAMAYA_SAT;return p==='geet'?GEET_WD:SAMAYA_WD;}
@@ -842,13 +1014,23 @@ function getPersonPct(u){
   var adjustedFraction=Math.min((completedDays+todayDone)/DAYS_PER_MONTH,1);
   return Math.min(Math.round((monthsDone/12)*100+(1/12)*adjustedFraction*100),100);
 }
-function updateStreak(){const tk=todayKey();if(!areTodayTasksDone(CU)||shared.streak.lastDate===tk)return;const y=new Date();y.setDate(y.getDate()-1);const yk=`${y.getFullYear()}-${String(y.getMonth()+1).padStart(2,'0')}-${String(y.getDate()).padStart(2,'0')}`;shared.streak.count=shared.streak.lastDate===yk?shared.streak.count+1:1;shared.streak.lastDate=tk;saveK(KEYS.shared,shared);}
+function updateStreak(){const tk=todayKey();if(!areTodayTasksDone(CU)||shared.streak.lastDate===tk)return;const y=new Date();y.setDate(y.getDate()-1);const yk=`${y.getFullYear()}-${String(y.getMonth()+1).padStart(2,'0')}-${String(y.getDate()).padStart(2,'0')}`;shared.streak.count=shared.streak.lastDate===yk?shared.streak.count+1:1;shared.streak.lastDate=tk;saveCloudData();}
 
 // ════════════════════════════════════════════
 // LOGIN
 // ════════════════════════════════════════════
-function login(u){CU=u;sess.user=u;saveK(KEYS.session,sess);document.getElementById('login-screen').classList.add('hidden');document.getElementById('app').classList.remove('hidden');applyTheme();renderHome();}
-function switchUser(){sess.user=null;saveK(KEYS.session,sess);document.getElementById('app').classList.add('hidden');document.getElementById('login-screen').classList.remove('hidden');}
+function login(u){
+  CU=u;sess.user=u;saveSession(sess);
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  document.getElementById('sync-banner').style.display='flex';
+  loadCloudData().then(()=>{
+    document.getElementById('sync-banner').style.display='none';
+    applyTheme();renderHome();
+    startSyncPoll();
+  });
+}
+function switchUser(){sess.user=null;saveSession(sess);CU=null;document.getElementById('app').classList.add('hidden');document.getElementById('login-screen').classList.remove('hidden');}
 function applyTheme(){
   const isG=CU==='geet';
   document.body.className=isG?'g-mode':'s-mode';
@@ -1074,7 +1256,7 @@ function toggleStudyTask(id){
   // Check if previous day is complete (day is unlocked)
   if(!isCurrentDayUnlocked(u)){showToast('🔒 Complete Day '+(currentDay-1)+' first!');return;}
   // Find the task
-  var allT=[...GEET_WD,...SAMAYA_WD,...GEET_SAT,...SAMAYA_SAT,...GEET_SUN,...SAMAYA_SUN];
+  var allT=[...GEET_WD_POOL,...SAMAYA_WD_POOL,...GEET_SAT,...SAMAYA_SAT,...GEET_SUN,...SAMAYA_SUN];
   var task=allT.find(function(t){return t.id===id;});
   if(!task)return;
   if(task.who!==u){showToast('🔒 Only '+(task.who==='geet'?'Geet':'Samaya')+' can check this');return;}
@@ -1191,9 +1373,9 @@ function saveNote(){
   const tk=todayKey();
   shared.notes=shared.notes.filter(n=>!(n.date===tk&&n.user===CU));
   shared.notes.push({id:`${CU}_${tk}`,date:tk,user:CU,text});
-  saveK(KEYS.shared,shared);showToast('📒 Note saved!');renderNotes();
+  saveCloudData();showToast('📒 Note saved!');renderNotes();
 }
-function deleteNote(id){shared.notes=shared.notes.filter(n=>n.id!==id);saveK(KEYS.shared,shared);renderNotes();showToast('Note deleted');}
+function deleteNote(id){shared.notes=shared.notes.filter(n=>n.id!==id);saveCloudData();renderNotes();showToast('Note deleted');}
 
 // ════════════════════════════════════════════
 // ROADMAP
@@ -1509,8 +1691,19 @@ function goPage(id,btn){
   if(id==='tools')renderTools();
 }
 
-if(CU)login(CU);
+// On startup — load cloud data then show login or home
+(async()=>{
+  if(CU){
+    document.getElementById('sync-banner').style.display='flex';
+    await loadCloudData();
+    document.getElementById('sync-banner').style.display='none';
+    applyTheme();renderHome();
+    startSyncPoll();
+  }
+})();
 setInterval(()=>{if(document.getElementById('page-daily').classList.contains('active'))renderDaily();},60000);
 </script>
 </body>
 </html>
+
+  
